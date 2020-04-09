@@ -12,15 +12,6 @@ int main(int argc, char **argv) {
     printf("parsed %d data points\n", N);
 
     for (int i = 0; i < N; i++) {
-        //printf("%d\n", data[i].mol->n_bonds);
-        struct mol *mol = data[i].mol;
-        for (int a = 0; a < mol->n_atoms; a++) {
-            for (int b = mol->a_bonds[a]; b < mol->a_bonds[a + 1]; b++) {
-                if (a != mol->b2a[mol->b2revb[mol->a2b[b]]]) {
-                    printf("%d %d %d\b", a, b, mol->b2a[mol->b2revb[mol->a2b[b]]]);
-                }
-            }
-        }
         free_mol(data[i].mol);
     }
     free(data);

@@ -8,7 +8,7 @@
 
 #define MP_DEPTH 3
 #define FC_DEPTH 2
-#define HIDDEN 300
+#define HIDDEN 10
 
 // storing intermediates for a layer
 struct act {
@@ -125,8 +125,18 @@ struct mpn *mpn_create() {
     return mpn;
 }
 
+void mpn_init(struct mpn *mpn) {
+    linear_init(&mpn->W_i);
+    linear_init(&mpn->W_h);
+    linear_init(&mpn->W_o);
+    for (int i = 0; i < FC_DEPTH; i++) {
+        linear_init(&mpn->fc[i]);
+    }
+    linear_init(&mpn->fco);
+}
+
 // allocate memory for intermediate activations
-void mpn_alloc(struct mpn *mpn, struct mol *mol) { 
+void alloc_intermediate(struct mpn *mpn, struct mol *mol) {
     // move input to GPU
     mol_to_device(mol, &mpn->d_mol);
 
@@ -151,7 +161,7 @@ void mpn_alloc(struct mpn *mpn, struct mol *mol) {
     cuda_malloc((void **) &mpn->fco_out, sizeof(float));
 }
 
-void clear_grads(struct mpn *mpn) {
+void free_intermediate(struct mpn *mpn) {
     free_dmol(&mpn->d_mol);
 
     for (int i = 0; i < MP_DEPTH + 1; i++) {
@@ -180,10 +190,23 @@ float mpn_forward(struct mpn *mpn, struct mol *mol) {
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
 
-    mpn_alloc(mpn, mol);
+    alloc_intermediate(mpn, mol);
 
     // messages = ReLU(mpn.W_i(mol.f_bonds))
     layer_forward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0]);
+
+    int rows = n_bonds;
+    int cols = mpn->W_i.out_dim;
+    float *acts = (float *) malloc(sizeof(float) * rows * cols);
+    cuda_memcpy_dtoh(acts, mpn->mp_acts[0]->linear_act, sizeof(float) * rows * cols);
+    for (int j = 0; j < rows; j++) {
+        for (int i = 0; i < cols; i++) {
+            printf("%4.2f ", acts[i + cols * j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+    free(acts);
 
     // message-passing
     for (int i = 0; i < MP_DEPTH; i++) {
@@ -273,7 +296,7 @@ float mpn_backward(struct mpn *mpn, struct mol *mol) {
         atom_gather_backward(n_atoms, n_bonds, HIDDEN,
             mpn->d_mol.a_bonds, mpn->d_mol.a2b,
             mpn->mp_atoms[i], mpn->mp_acts[i]->output);
-        cublas_axpy(n_bonds * HIDDEN, 1, dLdmesg, 1, mpn->mp_acts[i]->output, 1);
+        cublas_saxpy(n_bonds * HIDDEN, 1, dLdmesg, 1, mpn->mp_acts[i]->output, 1);
     }
     cuda_free(dLdmesg);
 
@@ -284,5 +307,15 @@ float mpn_backward(struct mpn *mpn, struct mol *mol) {
     layer_backward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0], garbage);
     cuda_free(garbage);
 
-    clear_grads(mpn);
+    free_intermediate(mpn);
+}
+
+void mpn_adam(struct mpn *mpn, int step, float alpha, float beta1, float beta2) {
+    linear_adam(&mpn->W_i, step, alpha, beta1, beta2);
+    linear_adam(&mpn->W_h, step, alpha, beta1, beta2);
+    linear_adam(&mpn->W_o, step, alpha, beta1, beta2);
+    for (int i = 0; i < FC_DEPTH; i++) {
+        linear_adam(&mpn->fc[i], step, alpha, beta1, beta2);
+    }
+    linear_adam(&mpn->fco, step, alpha, beta1, beta2);
 }

@@ -232,8 +232,13 @@ cublasHandle_t cublas_handle() {
 }
 
 // y = alpha * x + y
-void cublas_axpy(int n, float alpha, float *x, int incx, float *y, int incy) {
+void cublas_saxpy(int n, float alpha, float *x, int incx, float *y, int incy) {
     CUBLAS_CALL(cublasSaxpy(cublas_handle(), n, &alpha, x, incx, y, incy));
+}
+
+// x = alpha * x
+void cublas_sscal(int n, float alpha, float *x, int incx) {
+    CUBLAS_CALL(cublasSscal(cublas_handle(), n, &alpha, x, incx));
 }
 
 // C = alpha * A * B + beta * C
@@ -326,4 +331,8 @@ void curand_seed_generator(unsigned long long seed) {
 
 void curand_generate_uniform(float *output, size_t n) {
     CURAND_CALL(curandGenerateUniform(curand_generator(), output, n));
+}
+
+void curand_generate_normal(float *output, size_t n, float mean, float stddev) {
+    CURAND_CALL(curandGenerateNormal(curand_generator(), output, n, mean, stddev));
 }

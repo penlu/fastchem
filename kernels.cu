@@ -45,6 +45,10 @@ void linear_create(int in_dim, int out_dim, struct linear *linear) {
     cuda_malloc((void **) &linear->v, sizeof(float) * in_dim * out_dim);
 }
 
+void linear_init(struct linear *linear) {
+    curand_generate_normal(linear->w, linear->in_dim * linear->out_dim, 0, 1);
+}
+
 /*
 Given:
 - linear: one linear layer
@@ -85,6 +89,42 @@ void linear_backward(struct linear *linear, int batch,
     // propagate: calculate dL/d(input)
     cublas_sgemm(1, 0, idim, batch, odim,
         1, linear->w, odim, dLdo, odim, 0, dLdi, idim);
+}
+
+#define EPSILON 0.00000001
+__global__ void linear_adam_kernel(int n, int step,
+        float alpha, float beta1, float beta2,
+        float *w, float *d, float *m, float *v) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float mhat = m[i] / (1 - pow(beta1, step));
+        float vhat = v[i] / (1 - pow(beta2, step));
+
+        w[i] = w[i] - alpha * mhat / (sqrt(vhat) + EPSILON);
+    }
+}
+
+__global__ void elementwise_square(int n, float *x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        x[i] = x[i] * x[i];
+    }
+}
+
+void linear_adam(struct linear *linear, int step, float alpha, float beta1, float beta2) {
+    int n = linear->in_dim * linear->out_dim;
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    cublas_sscal(n, beta1, linear->m, 1);
+    cublas_saxpy(n, 1 - beta1, linear->d, 1, linear->m, 1);
+
+    elementwise_square<<<grid_size, BLOCK_SIZE>>>(n, linear->d);
+
+    cublas_sscal(n, beta2, linear->v, 1);
+    cublas_saxpy(n, 1 - beta2, linear->d, 1, linear->v, 1);
+
+    linear_adam_kernel<<<grid_size, BLOCK_SIZE>>>(n, step,
+        alpha, beta1, beta2, linear->w, linear->d, linear->m, linear->v);
 }
 
 __global__ void relu_forward_kernel(int n, float *input, float *output) {
