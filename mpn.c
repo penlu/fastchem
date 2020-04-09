@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -81,7 +82,7 @@ struct mpn {
 
     // for output
     float *fco_act;
-    float *fco_out;
+    float fco_out;
 };
 
 void mol_to_device(struct mol *mol, struct mol *d_mol) {
@@ -158,7 +159,6 @@ void alloc_intermediate(struct mpn *mpn, struct mol *mol) {
     }
 
     cuda_malloc((void **) &mpn->fco_act, sizeof(float));
-    cuda_malloc((void **) &mpn->fco_out, sizeof(float));
 }
 
 void free_intermediate(struct mpn *mpn) {
@@ -182,7 +182,6 @@ void free_intermediate(struct mpn *mpn) {
     }
 
     cuda_free(mpn->fco_act);
-    cuda_free(mpn->fco_out);
 }
 
 void print_matrix(int rows, int cols, float *d_mat) {
@@ -199,8 +198,20 @@ void print_matrix(int rows, int cols, float *d_mat) {
     free(mat);
 }
 
+float bceloss(float target, float z) {
+    if (z > 1) {
+        return z + log1p(exp(-z)) - target * z;
+    } else {
+        return log1p(exp(z)) - target * z;
+    }
+}
+
+float bceloss_grad(float target, float z) {
+    return 1/(1 + exp(-z)) - target;
+}
+
 // message-passing network
-float mpn_forward(struct mpn *mpn, struct mol *mol) {
+float mpn_forward(struct mpn *mpn, struct mol *mol, float target) {
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
 
@@ -250,21 +261,18 @@ float mpn_forward(struct mpn *mpn, struct mol *mol) {
     // TODO this should be a dot product
     linear_forward(&mpn->fco, 1, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->fco_act);
 
-    sigmoid_forward(1, mpn->fco_act, mpn->fco_out);
-
     // get the goods!!!
-    float result;
-    cuda_device_synchronize();
-    cuda_memcpy_dtoh(&result, mpn->fco_out, sizeof(float));
+    cuda_memcpy_dtoh(&mpn->fco_out, mpn->fco_act, sizeof(float));
 
-    return result;
+    return bceloss(target, mpn->fco_out);
 }
 
-float mpn_backward(struct mpn *mpn, struct mol *mol) {
+float mpn_backward(struct mpn *mpn, struct mol *mol, float target) {
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
 
-    sigmoid_backward(1, mpn->fco_act, get_ones(1), mpn->fco_act);
+    float grad = bceloss_grad(target, mpn->fco_out);
+    cuda_memcpy_htod(mpn->fco_act, &grad, sizeof(float));
 
     linear_backward(&mpn->fco, 1, mpn->fc_acts[FC_DEPTH - 1]->output,
         mpn->fco_act, mpn->fc_acts[FC_DEPTH - 1]->output);

@@ -37,3 +37,6 @@ void average_backward(int, int, float *, float *);
 
 void sigmoid_forward(int, float *, float *);
 void sigmoid_backward(int, float *, float *, float *);
+
+void bceloss_forward(float, float *,float *);
+void bceloss_backward(float, float *, float *);

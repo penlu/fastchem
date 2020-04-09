@@ -379,3 +379,20 @@ void sigmoid_backward(int n, float *input, float *dLdo, float *dLdi) {
     int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     sigmoid_backward_kernel<<<grid_size, BLOCK_SIZE>>>(n, input, dLdo, dLdi);
 }
+
+__global__ void bceloss_forward_kernel(float target, float *input, float *output) {
+    *output = target * log(1 + exp(- *input)) + (1 - target) * log(1 + exp(*input));
+}
+
+void bceloss_forward(float target, float *input, float *output) {
+    bceloss_forward_kernel<<<1, 1>>>(target, input, output);
+}
+
+__global__ void bceloss_backward_kernel(float target, float *input, float *dLdi) {
+    float sigmoid = 1 / (1 + exp(- *input));
+    *dLdi = -target * sigmoid + (1 - target) * (1 - sigmoid);
+}
+
+void bceloss_backward(float target, float *input, float *dLdi) {
+    bceloss_backward_kernel<<<1, 1>>>(target, input, dLdi);
+}

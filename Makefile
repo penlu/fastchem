@@ -1,6 +1,6 @@
 CC=gcc
 NVCC=nvcc
-CFLAGS=-fopenmp -O3 -Wextra -std=c11 -I. -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusparse -lcurand -lstdc++ -g -DDEBUG
+CFLAGS=-fopenmp -O3 -Wextra -std=c11 -I. -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lm -lcudart -lcublas -lcusparse -lcurand -lstdc++ -g -DDEBUG
 CUDAFLAGS=-std=c++11 -c -arch=sm_61 -g
 OBJ=main.o mol.o datapt.o mpn.o kernels.o cuda.o
 
