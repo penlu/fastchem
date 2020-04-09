@@ -231,6 +231,11 @@ cublasHandle_t cublas_handle() {
     return handle;
 }
 
+// y = alpha * x + y
+void cublas_axpy(int n, float alpha, float *x, int incx, float *y, int incy) {
+    CUBLAS_CALL(cublasSaxpy(cublas_handle(), n, &alpha, x, incx, y, incy));
+}
+
 // C = alpha * A * B + beta * C
 // matrices are in COLUMN-MAJOR FORMAT
 // dimensions are listed as rows x cols
@@ -271,6 +276,14 @@ cusparseHandle_t cusparse_handle() {
         init = 1;
     }
     return handle;
+}
+
+void cusparse_scsr2csc(int m, int n, int nnz,
+        float *csrVal, int *csrRowPtr, int *csrColInd,
+        float *cscVal, int *cscRowPtr, int *cscColInd) {
+    CUSPARSE_CALL(cusparseScsr2csc(cusparse_handle(), m, n, nnz,
+        csrVal, csrRowPtr, csrColInd, cscVal, cscRowPtr, cscColInd,
+        CUSPARSE_ACTION_SYMBOLIC, CUSPARSE_INDEX_BASE_ZERO));
 }
 
 void cusparse_sgemmi(int m, int n, int k, int nnz,

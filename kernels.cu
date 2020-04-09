@@ -3,6 +3,8 @@
 extern "C" {
 #include "kernels.h"
 #include "cuda.h"
+#include <stdio.h>
+#include <stdlib.h>
 }
 
 #define BLOCK_SIZE 1024
@@ -23,7 +25,6 @@ float *get_ones(int sz) {
         if (ones) {
             cuda_free(ones);
         }
-
         cuda_malloc((void **) &ones, sizeof(float) * sz);
         size = sz;
     }
@@ -142,17 +143,28 @@ void dropout_backward(int n, float *dropout, float *dLdo, float *dLdi) {
     dropout_backward_kernel<<<grid_size, BLOCK_SIZE>>>(n, dropout, dLdo, dLdi);
 }
 
+// gather bond messages onto atoms
 void atom_gather_forward(int n_atoms, int n_bonds, int hidden,
         int *a_bonds, int *a2b, float *input, float *output) {
-    //cusparse_sgemmi(hidden, n_bonds, n_atoms, n_bonds, 1,
-    //    input, n_bonds, get_ones(n_bonds), a_bonds, a2b, 0, output, n_atoms);
-    cusparse_scsrmm2(0, 1, n_atoms, hidden, n_bonds, n_bonds,
-        1, get_ones(n_bonds), a_bonds, a2b, input, hidden, 0, output, n_atoms);
+    cusparse_sgemmi(hidden, n_atoms, n_bonds, n_bonds, 1,
+        input, hidden, get_ones(n_bonds), a_bonds, a2b, 0, output, hidden);
 }
 
 void atom_gather_backward(int n_atoms, int n_bonds, int hidden,
-        int *a_bonds, int *a2b, float *input, float *dLdo, float *dLdi) {
-    // TODO
+        int *a_bonds, int *a2b, float *dLdo, float *dLdi) {
+    int *a_bondsT;
+    int *a2bT;
+    cuda_malloc((void **) &a_bondsT, sizeof(int) * (n_bonds + 1));
+    cuda_malloc((void **) &a2bT, sizeof(int) * n_bonds);
+
+    cusparse_scsr2csc(n_atoms, n_bonds, n_bonds,
+        get_ones(n_bonds), a_bonds, a2b,
+        get_ones(n_bonds), a2bT, a_bondsT);
+    cusparse_sgemmi(hidden, n_bonds, n_atoms, n_bonds, 1,
+        dLdo, hidden, get_ones(n_bonds), a_bondsT, a2bT, 0, dLdi, hidden);
+
+    cuda_free(a_bondsT);
+    cuda_free(a2bT);
 }
 
 /*
@@ -187,9 +199,8 @@ void slice(int r, int c, int i1, int i2, float *src, float *dst) {
     cuda_memcpy_2d(dst, i2 - i1, src + i1, c, i2 - i1, r);
 }
 
-// bond scatter
-// TODO optimize with shared memory?
-// TODO or just use another appropriate sgemmi?
+// scatter atom messages onto bonds
+// TODO optimize with shared memory? or find an appropriate gemmi?
 __global__ void bond_scatter_forward_kernel(int bonds, int hidden,
         int *b2a, int *b2revb, float *a_message, float *messages,
         float *new_messages) {
@@ -203,19 +214,52 @@ __global__ void bond_scatter_forward_kernel(int bonds, int hidden,
     }
 }
 
-void bond_scatter_forward(int bonds, int hidden,
+void bond_scatter_forward(int n_bonds, int hidden,
         int *b2a, int *b2revb, float *a_message, float *messages,
         float *new_messages) {
-    int grid_size = (bonds + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    bond_scatter_forward_kernel<<<grid_size, BLOCK_SIZE>>>(bonds, hidden,
+    int grid_size = (n_bonds + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    bond_scatter_forward_kernel<<<grid_size, BLOCK_SIZE>>>(n_bonds, hidden,
         b2a, b2revb, a_message, messages, new_messages);
 }
 
+__global__ void bond_scatter_backward_amesgkernel(int n_bonds,
+        int *b2revb, int *a2b, int *a2brev) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_bonds) {
+        a2brev[i] = b2revb[a2b[i]];
+    }
+}
+
+__global__ void bond_scatter_backward_mesgkernel(int n_bonds, int hidden,
+        int *b2revb, float *dLdo, float *dLdmesg) {
+    int bond = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bond < n_bonds) {
+        for (int i = 0; i < hidden; i++) {
+            dLdmesg[b2revb[bond] * hidden + i] = -dLdo[bond * hidden + i];
+        }
+    }
+}
+
 // two gradients come out of this
-void bond_scatter_backward(int bonds, int hidden,
-        int *b2a, int *b2revb, float *a_message_in, float *messages_in,
-        float *dLdo, float *dLdamesg, float *dLdmesgin) {
-    // TODO
+void bond_scatter_backward(int n_atoms, int n_bonds, int hidden,
+        int *a_bonds, int *a2b, int *b2revb,
+        float *dLdo, float *dLdamesg, float *dLdmesg) {
+    int grid_size = (n_bonds + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    int *a2brev;
+    cuda_malloc((void **) &a2brev, sizeof(float) * n_bonds);
+    bond_scatter_backward_amesgkernel<<<grid_size, BLOCK_SIZE>>>(n_bonds,
+        b2revb, a2b, a2brev);
+
+    // handle a_message gradients
+    cusparse_sgemmi(hidden, n_atoms, n_bonds, n_bonds, 1,
+        dLdo, hidden, get_ones(n_bonds), a_bonds, a2brev, 0, dLdamesg, hidden);
+
+    // handle message gradients
+    bond_scatter_backward_mesgkernel<<<grid_size, BLOCK_SIZE>>>
+        (n_bonds, hidden, b2revb, dLdo, dLdmesg);
+
+    cuda_free(a2brev);
 }
 
 /*
@@ -241,6 +285,7 @@ __global__ void average_backward_kernel(int r, int c, float *dLdo, float *dLdi) 
 }
 
 // TODO this is inefficient
+// TODO use cublasSger instead for efficiency?
 void average_backward(int r, int c, float *dLdo, float *dLdi) {
     int grid_size = (r + BLOCK_SIZE - 1) / BLOCK_SIZE;
     average_backward_kernel<<<grid_size, BLOCK_SIZE>>>(r, c, dLdo, dLdi);

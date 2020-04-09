@@ -101,6 +101,15 @@ void mol_to_device(struct mol *mol, struct mol *d_mol) {
     cuda_memcpy_htod(d_mol->b2revb, mol->b2revb, sizeof(int) * mol->n_bonds);
 }
 
+void free_dmol(struct mol *d_mol) {
+    cuda_free(d_mol->f_atoms);
+    cuda_free(d_mol->f_bonds);
+    cuda_free(d_mol->a_bonds);
+    cuda_free(d_mol->a2b);
+    cuda_free(d_mol->b2a);
+    cuda_free(d_mol->b2revb);
+}
+
 struct mpn *mpn_create() {
     struct mpn *mpn = malloc(sizeof(struct mpn));
 
@@ -142,8 +151,28 @@ void mpn_alloc(struct mpn *mpn, struct mol *mol) {
     cuda_malloc((void **) &mpn->fco_out, sizeof(float));
 }
 
-void mpn_free(struct mpn *mpn) {
-    // TODO TODO TODO
+void clear_grads(struct mpn *mpn) {
+    free_dmol(&mpn->d_mol);
+
+    for (int i = 0; i < MP_DEPTH + 1; i++) {
+        act_free(mpn->mp_acts[i]);
+    }
+    for (int i = 0; i < MP_DEPTH; i++) {
+        cuda_free(mpn->mp_atoms[i]);
+        cuda_free(mpn->mp_bonds[i]);
+    }
+
+    cuda_free(mpn->out_atoms);
+    cuda_free(mpn->out_atoms_f);
+    cuda_free(mpn->embedding);
+    act_free(mpn->out_act);
+
+    for (int i = 0; i < FC_DEPTH; i++) {
+        act_free(mpn->fc_acts[i]);
+    }
+
+    cuda_free(mpn->fco_act);
+    cuda_free(mpn->fco_out);
 }
 
 // message-passing network
@@ -200,6 +229,7 @@ float mpn_forward(struct mpn *mpn, struct mol *mol) {
 
     // get the goods!!!
     float result;
+    cuda_device_synchronize();
     cuda_memcpy_dtoh(&result, mpn->fco_out, sizeof(float));
 
     return result;
@@ -220,7 +250,6 @@ float mpn_backward(struct mpn *mpn, struct mol *mol) {
     }
     layer_backward(&mpn->fc[0], 1, mpn->embedding, mpn->fc_acts[0], mpn->embedding);
 
-    // TODO use cublasSger instead for efficiency?
     average_backward(n_atoms, HIDDEN, mpn->embedding, mpn->out_act->output);
 
     layer_backward(&mpn->W_o, n_atoms, mpn->out_atoms_f,
@@ -229,29 +258,31 @@ float mpn_backward(struct mpn *mpn, struct mol *mol) {
     slice(n_atoms, ATOM_FDIM + HIDDEN, ATOM_FDIM, ATOM_FDIM + HIDDEN,
         mpn->out_atoms_f, mpn->out_atoms);
 
-    atom_gather_backward(n_atoms, n_bonds, HIDDEN,
-        mpn->d_mol.a_bonds, mpn->d_mol.a2b, mpn->mp_acts[MP_DEPTH]->output,
+    atom_gather_backward(n_atoms, n_bonds, HIDDEN, mpn->d_mol.a_bonds, mpn->d_mol.a2b,
         mpn->out_atoms, mpn->mp_acts[MP_DEPTH]->output);
 
-    float *message_grad;
-    cuda_malloc((void **) &message_grad, sizeof(float) * n_bonds * HIDDEN);
+    // TODO can we avoid this allocation?
+    float *dLdmesg;
+    cuda_malloc((void **) &dLdmesg, sizeof(float) * n_bonds * HIDDEN);
     for (int i = MP_DEPTH - 1; i >= 0; i--) {
         layer_backward(&mpn->W_h, n_bonds, mpn->mp_bonds[i],
             mpn->mp_acts[i + 1], mpn->mp_bonds[i]);
-        bond_scatter_backward(n_bonds, HIDDEN, mpn->d_mol.b2a, mpn->d_mol.b2revb,
-            mpn->mp_atoms[i], mpn->mp_acts[i]->output, mpn->mp_bonds[i],
-            mpn->mp_atoms[i], message_grad);
+        bond_scatter_backward(n_atoms, n_bonds, HIDDEN,
+            mpn->d_mol.a_bonds, mpn->d_mol.a2b, mpn->d_mol.b2revb,
+            mpn->mp_bonds[i], mpn->mp_atoms[i], dLdmesg);
         atom_gather_backward(n_atoms, n_bonds, HIDDEN,
             mpn->d_mol.a_bonds, mpn->d_mol.a2b,
-            mpn->mp_acts[i]->output, mpn->mp_atoms[i], mpn->mp_acts[i]->output);
-        // TODO now add message_grad onto mpn->mp_acts[i]->output
+            mpn->mp_atoms[i], mpn->mp_acts[i]->output);
+        cublas_axpy(n_bonds * HIDDEN, 1, dLdmesg, 1, mpn->mp_acts[i]->output, 1);
     }
+    cuda_free(dLdmesg);
 
     // don't trash the input
     // TODO don't waste time here
     float *garbage;
     cuda_malloc((void **) &garbage, sizeof(float) * n_bonds * BOND_FDIM);
     layer_backward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0], garbage);
+    cuda_free(garbage);
 
-    mpn_free(mpn);
+    clear_grads(mpn);
 }

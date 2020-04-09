@@ -15,6 +15,7 @@ void train(struct datapt *data, int N) {
     for (int i = 0; i < N; i++) {
         if (data[i].mol->n_atoms && data[i].mol->n_bonds) {
             mpn_forward(mpn, data[i].mol);
+            mpn_backward(mpn, data[i].mol);
         }
     }
 }
