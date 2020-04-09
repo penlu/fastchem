@@ -16,15 +16,16 @@ void train(struct datapt *data, int N) {
     mpn_init(mpn);
 
     for (int step = 1; step <= 10; step++) {
+        float loss = 0;
         for (int i = 0; i < N; i++) {
-            if (data[i].mol->n_atoms && data[i].mol->n_bonds) {
-                float loss = mpn_forward(mpn, data[i].mol);
-                //printf("%f\n", loss);
+            struct mol *mol = data[i].mol;
+            if (mol->n_atoms && mol->n_bonds) {
+                loss += mpn_forward(mpn, mol);
 
-                //mpn_backward(mpn, data[i].mol);
+                mpn_backward(mpn, data[i].mol);
             }
         }
-        exit(0);
+        printf("total loss %f\n", loss);
         mpn_adam(mpn, step, 0.001, 0.9, 0.999);
     }
 }

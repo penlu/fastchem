@@ -16,7 +16,7 @@ __global__ void memset_kernel(float *p, float v, int n) {
     }
 }
 
-// return a host pointer to an array of float 1
+// return a device pointer to an array of float 1
 float *get_ones(int sz) {
     static int size = 0;
     static float *ones = NULL;
@@ -125,6 +125,8 @@ void linear_adam(struct linear *linear, int step, float alpha, float beta1, floa
 
     linear_adam_kernel<<<grid_size, BLOCK_SIZE>>>(n, step,
         alpha, beta1, beta2, linear->w, linear->d, linear->m, linear->v);
+
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(linear->d, 0, n);
 }
 
 __global__ void relu_forward_kernel(int n, float *input, float *output) {
@@ -219,8 +221,11 @@ Produces:
 - dst is a column-wise concatenation of src1 and src2
 */
 void concat(int r, int c1, int c2, float *src1, float *src2, float *dst) {
-    cuda_memcpy_2d(dst, c1 + c2, src1, c1, c1, r);
-    cuda_memcpy_2d(dst + c1, c1 + c2, src2, c2, c2, r);
+    int dst_width = (c1 + c2) * sizeof(float);
+    cuda_memcpy_2d(dst, dst_width,
+        src1, c1 * sizeof(float), c1 * sizeof(float), r);
+    cuda_memcpy_2d(dst + c1, dst_width,
+        src2, c2 * sizeof(float), c2 * sizeof(float), r);
 }
 
 /*
@@ -236,7 +241,9 @@ Produces:
 Assume that 0 <= i1 < i2 < c
 */
 void slice(int r, int c, int i1, int i2, float *src, float *dst) {
-    cuda_memcpy_2d(dst, i2 - i1, src + i1, c, i2 - i1, r);
+    int width = (i2 - i1) * sizeof(float);
+    cuda_memcpy_2d(dst, width,
+        src + i1, c * sizeof(float), width, r);
 }
 
 // scatter atom messages onto bonds
@@ -354,8 +361,8 @@ void sigmoid_forward(int n, float *input, float *output) {
 __global__ void sigmoid_backward_kernel(int n, float *input, float *dLdo, float *dLdi) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        float e = exp(-input[i]);
-        dLdi[i] = dLdo[i] * e / ((1 + e) * (1 + e));
+        float x = 1 / (1 + exp(-input[i]));
+        dLdi[i] = dLdo[i] * x * (1 - x);
     }
 }
 

@@ -185,6 +185,20 @@ void free_intermediate(struct mpn *mpn) {
     cuda_free(mpn->fco_out);
 }
 
+void print_matrix(int rows, int cols, float *d_mat) {
+    float *mat = (float *) malloc(sizeof(float) * rows * cols);
+    cuda_memcpy_dtoh(mat, d_mat, sizeof(float) * rows * cols);
+    for (int j = 0; j < rows; j++) {
+        printf("%d: ", j);
+        for (int i = 0; i < cols; i++) {
+            printf("%4.2f ", mat[i + cols * j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+    free(mat);
+}
+
 // message-passing network
 float mpn_forward(struct mpn *mpn, struct mol *mol) {
     int n_bonds = mol->n_bonds;
@@ -194,19 +208,6 @@ float mpn_forward(struct mpn *mpn, struct mol *mol) {
 
     // messages = ReLU(mpn.W_i(mol.f_bonds))
     layer_forward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0]);
-
-    int rows = n_bonds;
-    int cols = mpn->W_i.out_dim;
-    float *acts = (float *) malloc(sizeof(float) * rows * cols);
-    cuda_memcpy_dtoh(acts, mpn->mp_acts[0]->linear_act, sizeof(float) * rows * cols);
-    for (int j = 0; j < rows; j++) {
-        for (int i = 0; i < cols; i++) {
-            printf("%4.2f ", acts[i + cols * j]);
-        }
-        printf("\n");
-    }
-    printf("\n");
-    free(acts);
 
     // message-passing
     for (int i = 0; i < MP_DEPTH; i++) {
@@ -248,6 +249,7 @@ float mpn_forward(struct mpn *mpn, struct mol *mol) {
 
     // TODO this should be a dot product
     linear_forward(&mpn->fco, 1, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->fco_act);
+
     sigmoid_forward(1, mpn->fco_act, mpn->fco_out);
 
     // get the goods!!!
