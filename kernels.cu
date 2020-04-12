@@ -319,14 +319,14 @@ Produces:
 Averages the rows of a matrix by product with all-1 vector.
 */
 void average_forward(int r, int c, float *input, float *output) {
-    cublas_sgemv(0, c, r, 1, input, c, get_ones(r), 0, output);
+    cublas_sgemv(0, c, r, 1./r, input, c, get_ones(r), 0, output);
 }
 
 __global__ void average_backward_kernel(int r, int c, float *dLdo, float *dLdi) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < r) {
         for (int j = 0; j < c; j++) {
-            dLdi[r * i + j] = dLdo[j];
+            dLdi[c * i + j] = dLdo[j] / r;
         }
     }
 }
@@ -380,19 +380,30 @@ void sigmoid_backward(int n, float *input, float *dLdo, float *dLdi) {
     sigmoid_backward_kernel<<<grid_size, BLOCK_SIZE>>>(n, input, dLdo, dLdi);
 }
 
-__global__ void bceloss_forward_kernel(float target, float *input, float *output) {
-    *output = target * log(1 + exp(- *input)) + (1 - target) * log(1 + exp(*input));
+__global__ void bceloss_forward_kernel(int n, float *target, float *input, float *output) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        if (input[i] > 1) {
+            output[i] = input[i] + log1p(exp(-input[i])) - target[i] * input[i];
+        } else {
+            output[i] = log1p(exp(input[i])) - target[i] * input[i];
+        }
+    }
 }
 
-void bceloss_forward(float target, float *input, float *output) {
-    bceloss_forward_kernel<<<1, 1>>>(target, input, output);
+void bceloss_forward(int n, float *target, float *input, float *output) {
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    bceloss_forward_kernel<<<grid_size, BLOCK_SIZE>>>(n, target, input, output);
 }
 
-__global__ void bceloss_backward_kernel(float target, float *input, float *dLdi) {
-    float sigmoid = 1 / (1 + exp(- *input));
-    *dLdi = -target * sigmoid + (1 - target) * (1 - sigmoid);
+__global__ void bceloss_backward_kernel(int n, float *target, float *input, float *dLdi) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        dLdi[i] = 1/(1 + exp(-input[i])) - target[i];
+    }
 }
 
-void bceloss_backward(float target, float *input, float *dLdi) {
-    bceloss_backward_kernel<<<1, 1>>>(target, input, dLdi);
+void bceloss_backward(int n, float *target, float *input, float *dLdi) {
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    bceloss_backward_kernel<<<grid_size, BLOCK_SIZE>>>(n, target, input, dLdi);
 }

@@ -231,5 +231,7 @@ if __name__ == '__main__':
                 mol_graph = SMILES_TO_GRAPH[smiles]
             else:
                 mol_graph = MolGraph(smiles, False)
-            dump_graph(mol_graph)
-            print(','.join([str(f) for f in row[1:]]))
+
+            if mol_graph.n_atoms != 0 and mol_graph.n_bonds != 0:
+                dump_graph(mol_graph)
+                print(','.join([str(f) for f in row[1:]]))

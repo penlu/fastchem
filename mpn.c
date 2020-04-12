@@ -4,6 +4,7 @@
 
 #include "mol.h"
 #include "datapt.h"
+#include "batch.h"
 #include "cuda.h"
 #include "kernels.h"
 
@@ -65,13 +66,14 @@ struct mpn {
 
     // for the device-side mol
     struct mol d_mol;
+    float *target;
 
     // for message passing
     struct act *mp_acts[MP_DEPTH + 1];  // message-passing activation storage
     float *mp_atoms[MP_DEPTH];          // outputs of atom-gather
     float *mp_bonds[MP_DEPTH];          // outputs of bond-scatter
 
-    // for molecule embedding
+    // for molecule embeddings
     float *out_atoms;
     float *out_atoms_f;
     struct act *out_act;
@@ -82,7 +84,7 @@ struct mpn {
 
     // for output
     float *fco_act;
-    float fco_out;
+    float *losses;
 };
 
 void mol_to_device(struct mol *mol, struct mol *d_mol) {
@@ -137,10 +139,15 @@ void mpn_init(struct mpn *mpn) {
 }
 
 // allocate memory for intermediate activations
-void alloc_intermediate(struct mpn *mpn, struct mol *mol) {
+void alloc_intermediate(struct mpn *mpn, struct batch *batch) {
+    struct mol *mol = batch->mol;
+
     // move input to GPU
     mol_to_device(mol, &mpn->d_mol);
+    cuda_malloc((void **) &mpn->target, sizeof(float) * batch->n_mols);
+    cuda_memcpy_htod(mpn->target, batch->labels, sizeof(float) * batch->n_mols);
 
+    // activation allocations
     for (int i = 0; i < MP_DEPTH + 1; i++) {
         mpn->mp_acts[i] = act_create(mol->n_bonds * HIDDEN);
     }
@@ -151,18 +158,21 @@ void alloc_intermediate(struct mpn *mpn, struct mol *mol) {
 
     cuda_malloc((void **) &mpn->out_atoms, sizeof(float) * mol->n_atoms * HIDDEN);
     cuda_malloc((void **) &mpn->out_atoms_f, sizeof(float) * mol->n_atoms * (ATOM_FDIM + HIDDEN));
-    cuda_malloc((void **) &mpn->embedding, sizeof(float) * HIDDEN);
     mpn->out_act = act_create(mol->n_atoms * HIDDEN);
 
+    cuda_malloc((void **) &mpn->embedding, sizeof(float) * batch->n_mols * HIDDEN);
+
     for (int i = 0; i < FC_DEPTH; i++) {
-        mpn->fc_acts[i] = act_create(mol->n_bonds * HIDDEN);
+        mpn->fc_acts[i] = act_create(batch->n_mols * HIDDEN);
     }
 
-    cuda_malloc((void **) &mpn->fco_act, sizeof(float));
+    cuda_malloc((void **) &mpn->fco_act, sizeof(float) * batch->n_mols);
+    cuda_malloc((void **) &mpn->losses, sizeof(float) * batch->n_mols);
 }
 
 void free_intermediate(struct mpn *mpn) {
     free_dmol(&mpn->d_mol);
+    cuda_free(mpn->target);
 
     for (int i = 0; i < MP_DEPTH + 1; i++) {
         act_free(mpn->mp_acts[i]);
@@ -174,14 +184,16 @@ void free_intermediate(struct mpn *mpn) {
 
     cuda_free(mpn->out_atoms);
     cuda_free(mpn->out_atoms_f);
-    cuda_free(mpn->embedding);
     act_free(mpn->out_act);
+
+    cuda_free(mpn->embedding);
 
     for (int i = 0; i < FC_DEPTH; i++) {
         act_free(mpn->fc_acts[i]);
     }
 
     cuda_free(mpn->fco_act);
+    cuda_free(mpn->losses);
 }
 
 void print_matrix(int rows, int cols, float *d_mat) {
@@ -198,24 +210,14 @@ void print_matrix(int rows, int cols, float *d_mat) {
     free(mat);
 }
 
-float bceloss(float target, float z) {
-    if (z > 1) {
-        return z + log1p(exp(-z)) - target * z;
-    } else {
-        return log1p(exp(z)) - target * z;
-    }
-}
-
-float bceloss_grad(float target, float z) {
-    return 1/(1 + exp(-z)) - target;
-}
-
 // message-passing network
-float mpn_forward(struct mpn *mpn, struct mol *mol, float target) {
+float mpn_forward(struct mpn *mpn, struct batch *batch) {
+    struct mol *mol = batch->mol;
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
+    int n_mols = batch->n_mols;
 
-    alloc_intermediate(mpn, mol);
+    alloc_intermediate(mpn, batch);
 
     // messages = ReLU(mpn.W_i(mol.f_bonds))
     layer_forward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0]);
@@ -248,42 +250,60 @@ float mpn_forward(struct mpn *mpn, struct mol *mol, float target) {
     layer_forward(&mpn->W_o, n_atoms, mpn->out_atoms_f, mpn->out_act);
 
     // average these to get the molecule embedding
-    average_forward(n_atoms, HIDDEN, mpn->out_act->output, mpn->embedding);
+    for (int i = 0; i < batch->n_mols; i++) {
+        int start = batch->m_atoms[i];
+        int end = batch->m_atoms[i + 1];
+        average_forward(end - start, HIDDEN,
+            mpn->out_act->output + start * HIDDEN,
+            mpn->embedding + i * HIDDEN);
+    }
 
     // one fully-connected feed-forward network, three layers
     // linear o activation o dropout
     // linear o activation to final value
-    layer_forward(&mpn->fc[0], 1, mpn->embedding, mpn->fc_acts[0]);
+    layer_forward(&mpn->fc[0], batch->n_mols, mpn->embedding, mpn->fc_acts[0]);
     for (int i = 1; i < FC_DEPTH; i++) {
-        layer_forward(&mpn->fc[i], 1, mpn->fc_acts[i - 1]->output, mpn->fc_acts[i]);
+        layer_forward(&mpn->fc[i], batch->n_mols, mpn->fc_acts[i - 1]->output, mpn->fc_acts[i]);
     }
 
-    // TODO this should be a dot product
-    linear_forward(&mpn->fco, 1, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->fco_act);
+    linear_forward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->fco_act);
+
+    bceloss_forward(batch->n_mols, mpn->target, mpn->fco_act, mpn->losses);
 
     // get the goods!!!
-    cuda_memcpy_dtoh(&mpn->fco_out, mpn->fco_act, sizeof(float));
+    float *h_losses = malloc(sizeof(float) * batch->n_mols);
+    cuda_memcpy_dtoh(h_losses, mpn->losses, sizeof(float) * batch->n_mols);
+    float loss = 0;
+    for (int i = 0; i < batch->n_mols; i++) {
+        loss += h_losses[i];
+    }
 
-    return bceloss(target, mpn->fco_out);
+    return loss;
 }
 
-float mpn_backward(struct mpn *mpn, struct mol *mol, float target) {
+float mpn_backward(struct mpn *mpn, struct batch *batch) {
+    struct mol *mol = batch->mol;
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
 
-    float grad = bceloss_grad(target, mpn->fco_out);
-    cuda_memcpy_htod(mpn->fco_act, &grad, sizeof(float));
+    bceloss_backward(batch->n_mols, mpn->target, mpn->fco_act, mpn->losses);
 
-    linear_backward(&mpn->fco, 1, mpn->fc_acts[FC_DEPTH - 1]->output,
-        mpn->fco_act, mpn->fc_acts[FC_DEPTH - 1]->output);
+    linear_backward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output,
+        mpn->losses, mpn->fc_acts[FC_DEPTH - 1]->output);
 
     for (int i = FC_DEPTH - 1; i > 0; i--) {
-        layer_backward(&mpn->fc[i], 1, mpn->fc_acts[i - 1]->output,
+        layer_backward(&mpn->fc[i], batch->n_mols, mpn->fc_acts[i - 1]->output,
             mpn->fc_acts[i], mpn->fc_acts[i - 1]->output);
     }
-    layer_backward(&mpn->fc[0], 1, mpn->embedding, mpn->fc_acts[0], mpn->embedding);
+    layer_backward(&mpn->fc[0], batch->n_mols, mpn->embedding, mpn->fc_acts[0], mpn->embedding);
 
-    average_backward(n_atoms, HIDDEN, mpn->embedding, mpn->out_act->output);
+    for (int i = 0; i < batch->n_mols; i++) {
+        int start = batch->m_atoms[i];
+        int end = batch->m_atoms[i + 1];
+        average_backward(end - start, HIDDEN,
+            mpn->embedding + i * HIDDEN,
+            mpn->out_act->output + start * HIDDEN);
+    }
 
     layer_backward(&mpn->W_o, n_atoms, mpn->out_atoms_f,
         mpn->out_act, mpn->out_atoms_f);
