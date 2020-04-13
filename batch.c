@@ -1,10 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include "mol.h"
 #include "datapt.h"
 #include "batch.h"
+
+void *mallock(size_t size) {
+    void *p = malloc(size);
+    mlock(p, size);
+    return p;
+}
 
 // create list of batches from list of molecules
 // n: number of molecules
@@ -34,12 +41,12 @@ struct batch *batch_create(int n, int *l, int b, struct datapt *data) {
         struct mol *bmol = batches[i].mol;
         bmol->n_atoms = b_atoms;
         bmol->n_bonds = b_bonds;
-        bmol->f_atoms = malloc(sizeof(float) * b_atoms * ATOM_FDIM);
-        bmol->f_bonds = malloc(sizeof(float) * b_bonds * BOND_FDIM);
-        bmol->a_bonds = malloc(sizeof(int) * (b_atoms + 1));
-        bmol->a2b = malloc(sizeof(int) * b_bonds);
-        bmol->b2a = malloc(sizeof(int) * b_bonds);
-        bmol->b2revb = malloc(sizeof(int) * b_bonds);
+        bmol->f_atoms = mallock(sizeof(float) * b_atoms * ATOM_FDIM);
+        bmol->f_bonds = mallock(sizeof(float) * b_bonds * BOND_FDIM);
+        bmol->a_bonds = mallock(sizeof(int) * (b_atoms + 1));
+        bmol->a2b = mallock(sizeof(int) * b_bonds);
+        bmol->b2a = mallock(sizeof(int) * b_bonds);
+        bmol->b2revb = mallock(sizeof(int) * b_bonds);
 
         // pack molecules
         int a_offset = 0;

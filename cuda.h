@@ -11,6 +11,7 @@ void cublas_sscal(int, float, float *, int);
 void cublas_sgemm(int, int, int, int, int,
     float, float *, int, float *, int, float, float *, int);
 void cublas_sgemv(int, int, int, float, float *, int, float *, float, float *);
+void cublas_sger(int, int, float, float *, int, float *, int, float *, int);
 
 // cusparse
 void cusparse_scsr2csc(int, int, int,

@@ -271,6 +271,12 @@ void cublas_sgemv(int transa, int m, int n,
         m, n, &alpha, A, lda, x, 1, &beta, y, 1));
 }
 
+void cublas_sger(int m, int n, float alpha,
+        float *x, int incx, float *y, int incy, float *A, int lda) {
+    CUBLAS_CALL(cublasSger(cublas_handle(),
+        m, n, &alpha, x, incx, y, incy, A, lda));
+}
+
 // CUSPARSE library calls
 
 cusparseHandle_t cusparse_handle() {

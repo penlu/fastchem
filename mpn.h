@@ -4,3 +4,6 @@ void mpn_init(struct mpn *);
 float mpn_forward(struct mpn *, struct batch *);
 float mpn_backward(struct mpn *, struct batch *);
 void mpn_adam(struct mpn *, int, float, float, float);
+
+float mpn_loss(struct mpn *, struct batch *);
+float *mpn_test(struct mpn *, struct batch *);

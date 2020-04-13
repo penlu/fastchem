@@ -9,8 +9,8 @@
 #include "kernels.h"
 
 #define MP_DEPTH 3
-#define FC_DEPTH 2
-#define HIDDEN 10
+#define FC_DEPTH 1
+#define HIDDEN 300
 
 // storing intermediates for a layer
 struct act {
@@ -57,8 +57,11 @@ struct mpn {
     struct linear W_i; // bond_fdim x hidden_size
     struct linear W_h; // hidden_size x hidden_size
     struct linear W_o; // (atom_fdim + hidden_size) x hidden_size
+    struct bias b_o; // hidden_size
     struct linear fc[FC_DEPTH]; // hidden_size x hidden_size
+    struct bias fcb[FC_DEPTH]; // hidden_size
     struct linear fco; // hidden_size x 1
+    //struct bias fcob; // 1
 
     // activation storage
     // TODO surely there is a better way
@@ -83,8 +86,7 @@ struct mpn {
     struct act *fc_acts[FC_DEPTH];
 
     // for output
-    float *fco_act;
-    float *losses;
+    float *finals;
 };
 
 void mol_to_device(struct mol *mol, struct mol *d_mol) {
@@ -119,11 +121,14 @@ struct mpn *mpn_create() {
     linear_create(BOND_FDIM, HIDDEN, &mpn->W_i);
     linear_create(HIDDEN, HIDDEN, &mpn->W_h);
     linear_create(ATOM_FDIM + HIDDEN, HIDDEN, &mpn->W_o);
+    bias_create(HIDDEN, &mpn->b_o);
     for (int i = 0; i < FC_DEPTH; i++) {
         linear_create(HIDDEN, HIDDEN, &mpn->fc[i]);
+        bias_create(HIDDEN, &mpn->fcb[i]);
     }
     // TODO this is a vector dot and should not use sgemm
     linear_create(HIDDEN, 1, &mpn->fco);
+    //bias_create(1, &mpn->fcob);
 
     return mpn;
 }
@@ -132,10 +137,13 @@ void mpn_init(struct mpn *mpn) {
     linear_init(&mpn->W_i);
     linear_init(&mpn->W_h);
     linear_init(&mpn->W_o);
+    bias_init(&mpn->b_o);
     for (int i = 0; i < FC_DEPTH; i++) {
         linear_init(&mpn->fc[i]);
+        bias_init(&mpn->fcb[i]);
     }
     linear_init(&mpn->fco);
+    //bias_init(&mpn->fcob);
 }
 
 // allocate memory for intermediate activations
@@ -166,8 +174,7 @@ void alloc_intermediate(struct mpn *mpn, struct batch *batch) {
         mpn->fc_acts[i] = act_create(batch->n_mols * HIDDEN);
     }
 
-    cuda_malloc((void **) &mpn->fco_act, sizeof(float) * batch->n_mols);
-    cuda_malloc((void **) &mpn->losses, sizeof(float) * batch->n_mols);
+    cuda_malloc((void **) &mpn->finals, sizeof(float) * batch->n_mols);
 }
 
 void free_intermediate(struct mpn *mpn) {
@@ -192,8 +199,7 @@ void free_intermediate(struct mpn *mpn) {
         act_free(mpn->fc_acts[i]);
     }
 
-    cuda_free(mpn->fco_act);
-    cuda_free(mpn->losses);
+    cuda_free(mpn->finals);
 }
 
 void print_matrix(int rows, int cols, float *d_mat) {
@@ -211,7 +217,7 @@ void print_matrix(int rows, int cols, float *d_mat) {
 }
 
 // message-passing network
-float mpn_forward(struct mpn *mpn, struct batch *batch) {
+float *mpn_forward(struct mpn *mpn, struct batch *batch) {
     struct mol *mol = batch->mol;
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
@@ -248,6 +254,7 @@ float mpn_forward(struct mpn *mpn, struct batch *batch) {
 
     // dropout(ReLU(mpn.W_o(that)))
     layer_forward(&mpn->W_o, n_atoms, mpn->out_atoms_f, mpn->out_act);
+    bias_forward(&mpn->b_o, n_atoms, mpn->out_act->output);
 
     // average these to get the molecule embedding
     for (int i = 0; i < batch->n_mols; i++) {
@@ -262,23 +269,16 @@ float mpn_forward(struct mpn *mpn, struct batch *batch) {
     // linear o activation o dropout
     // linear o activation to final value
     layer_forward(&mpn->fc[0], batch->n_mols, mpn->embedding, mpn->fc_acts[0]);
+    bias_forward(&mpn->fcb[0], batch->n_mols, mpn->fc_acts[0]->output);
     for (int i = 1; i < FC_DEPTH; i++) {
         layer_forward(&mpn->fc[i], batch->n_mols, mpn->fc_acts[i - 1]->output, mpn->fc_acts[i]);
+        bias_forward(&mpn->fcb[i], batch->n_mols, mpn->fc_acts[i]->output);
     }
 
-    linear_forward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->fco_act);
+    linear_forward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->finals);
+    //bias_forward(&mpn->fcob, batch->n_mols, mpn->finals);
 
-    bceloss_forward(batch->n_mols, mpn->target, mpn->fco_act, mpn->losses);
-
-    // get the goods!!!
-    float *h_losses = malloc(sizeof(float) * batch->n_mols);
-    cuda_memcpy_dtoh(h_losses, mpn->losses, sizeof(float) * batch->n_mols);
-    float loss = 0;
-    for (int i = 0; i < batch->n_mols; i++) {
-        loss += h_losses[i];
-    }
-
-    return loss;
+    return mpn->finals;
 }
 
 float mpn_backward(struct mpn *mpn, struct batch *batch) {
@@ -286,15 +286,18 @@ float mpn_backward(struct mpn *mpn, struct batch *batch) {
     int n_bonds = mol->n_bonds;
     int n_atoms = mol->n_atoms;
 
-    bceloss_backward(batch->n_mols, mpn->target, mpn->fco_act, mpn->losses);
+    bceloss_backward(batch->n_mols, mpn->target, mpn->finals, mpn->finals);
 
+    //bias_backward(&mpn->fcob, batch->n_mols, mpn->finals);
     linear_backward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output,
-        mpn->losses, mpn->fc_acts[FC_DEPTH - 1]->output);
+        mpn->finals, mpn->fc_acts[FC_DEPTH - 1]->output);
 
     for (int i = FC_DEPTH - 1; i > 0; i--) {
+        bias_backward(&mpn->fcb[i], n_atoms, mpn->fc_acts[i]->output);
         layer_backward(&mpn->fc[i], batch->n_mols, mpn->fc_acts[i - 1]->output,
             mpn->fc_acts[i], mpn->fc_acts[i - 1]->output);
     }
+    bias_backward(&mpn->fcb[0], batch->n_mols, mpn->fc_acts[0]->output);
     layer_backward(&mpn->fc[0], batch->n_mols, mpn->embedding, mpn->fc_acts[0], mpn->embedding);
 
     for (int i = 0; i < batch->n_mols; i++) {
@@ -305,6 +308,7 @@ float mpn_backward(struct mpn *mpn, struct batch *batch) {
             mpn->out_act->output + start * HIDDEN);
     }
 
+    bias_backward(&mpn->b_o, n_atoms, mpn->out_act->output);
     layer_backward(&mpn->W_o, n_atoms, mpn->out_atoms_f,
         mpn->out_act, mpn->out_atoms_f);
 
@@ -348,4 +352,38 @@ void mpn_adam(struct mpn *mpn, int step, float alpha, float beta1, float beta2) 
         linear_adam(&mpn->fc[i], step, alpha, beta1, beta2);
     }
     linear_adam(&mpn->fco, step, alpha, beta1, beta2);
+}
+
+float mpn_loss(struct mpn *mpn, struct batch *batch) {
+    float *losses;
+    cuda_malloc((void **) &losses, sizeof(float) * batch->n_mols);
+
+    bceloss_forward(batch->n_mols, mpn->target, mpn->finals, losses);
+
+    // get the goods!!!
+    float *h_losses = malloc(sizeof(float) * batch->n_mols);
+    cuda_memcpy_dtoh(h_losses, losses, sizeof(float) * batch->n_mols);
+    float loss = 0;
+    for (int i = 0; i < batch->n_mols; i++) {
+        loss += h_losses[i];
+    }
+    free(h_losses);
+    cuda_free(losses);
+
+    return loss;
+}
+
+float *mpn_test(struct mpn *mpn, struct batch *batch) {
+    float *preds;
+    cuda_malloc((void **) &preds, sizeof(float) * batch->n_mols);
+
+    mpn_forward(mpn, batch);
+
+    sigmoid_forward(batch->n_mols, mpn->finals, preds);
+
+    float *h_preds = malloc(sizeof(float) * batch->n_mols);
+    cuda_memcpy_dtoh(h_preds, preds, sizeof(float) * batch->n_mols);
+    free_intermediate(mpn);
+
+    return h_preds;
 }

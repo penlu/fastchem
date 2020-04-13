@@ -35,6 +35,74 @@ float *get_ones(int sz) {
     return ones;
 }
 
+void bias_create(int dim, struct bias *bias) {
+    bias->dim = dim;
+
+    cuda_malloc((void **) &bias->b, sizeof(float) * dim);
+    cuda_malloc((void **) &bias->d, sizeof(float) * dim);
+    cuda_malloc((void **) &bias->m, sizeof(float) * dim);
+    cuda_malloc((void **) &bias->v, sizeof(float) * dim);
+
+    int grid_size = (dim + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(bias->b, 0, dim);
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(bias->d, 0, dim);
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(bias->m, 0, dim);
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(bias->v, 0, dim);
+}
+
+void bias_init(struct bias *bias) {
+    int size = bias->dim;
+    float weight = 1./sqrt(size);
+    curand_generate_normal(bias->b, size, 0, weight);
+}
+
+void bias_forward(struct bias *bias, int batch, float *input) {
+    cublas_sger(bias->dim, batch, 1, bias->b, 1, get_ones(batch), 1, input, bias->dim);
+}
+
+void bias_backward(struct bias *bias, int batch, float *dLdo) {
+    //cublas_sgemv(0, c, r, 1./r, input, c, get_ones(r), 0, output);
+    cublas_sgemv(0, bias->dim, batch, 1, dLdo, bias->dim, get_ones(batch), 1, bias->d);
+}
+
+#define EPSILON 0.00000001
+__global__ void adam_kernel(int n, int step,
+        float alpha, float beta1, float beta2,
+        float *w, float *m, float *v) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float mhat = m[i] / (1 - pow(beta1, step));
+        float vhat = v[i] / (1 - pow(beta2, step));
+
+        w[i] = w[i] - alpha * mhat / (sqrt(vhat) + EPSILON);
+    }
+}
+
+__global__ void elementwise_square(int n, float *x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        x[i] = x[i] * x[i];
+    }
+}
+
+void bias_adam(struct bias *bias, int step, float alpha, float beta1, float beta2) {
+    int n = bias->dim;
+    int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    cublas_sscal(n, beta1, bias->m, 1);
+    cublas_saxpy(n, 1 - beta1, bias->d, 1, bias->m, 1);
+
+    elementwise_square<<<grid_size, BLOCK_SIZE>>>(n, bias->d);
+
+    cublas_sscal(n, beta2, bias->v, 1);
+    cublas_saxpy(n, 1 - beta2, bias->d, 1, bias->v, 1);
+
+    adam_kernel<<<grid_size, BLOCK_SIZE>>>(n, step,
+        alpha, beta1, beta2, bias->b, bias->m, bias->v);
+
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(bias->d, 0, n);
+}
+
 void linear_create(int in_dim, int out_dim, struct linear *linear) {
     linear->in_dim = in_dim;
     linear->out_dim = out_dim;
@@ -43,10 +111,18 @@ void linear_create(int in_dim, int out_dim, struct linear *linear) {
     cuda_malloc((void **) &linear->d, sizeof(float) * in_dim * out_dim);
     cuda_malloc((void **) &linear->m, sizeof(float) * in_dim * out_dim);
     cuda_malloc((void **) &linear->v, sizeof(float) * in_dim * out_dim);
+
+    int grid_size = (in_dim * out_dim + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(linear->w, 0, in_dim * out_dim);
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(linear->d, 0, in_dim * out_dim);
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(linear->m, 0, in_dim * out_dim);
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(linear->v, 0, in_dim * out_dim);
 }
 
 void linear_init(struct linear *linear) {
-    curand_generate_normal(linear->w, linear->in_dim * linear->out_dim, 0, 1);
+    int size = linear->in_dim * linear->out_dim;
+    float weight = 1./sqrt(linear->in_dim);
+    curand_generate_normal(linear->w, size, 0, weight);
 }
 
 /*
@@ -91,26 +167,6 @@ void linear_backward(struct linear *linear, int batch,
         1, linear->w, odim, dLdo, odim, 0, dLdi, idim);
 }
 
-#define EPSILON 0.00000001
-__global__ void linear_adam_kernel(int n, int step,
-        float alpha, float beta1, float beta2,
-        float *w, float *d, float *m, float *v) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        float mhat = m[i] / (1 - pow(beta1, step));
-        float vhat = v[i] / (1 - pow(beta2, step));
-
-        w[i] = w[i] - alpha * mhat / (sqrt(vhat) + EPSILON);
-    }
-}
-
-__global__ void elementwise_square(int n, float *x) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        x[i] = x[i] * x[i];
-    }
-}
-
 void linear_adam(struct linear *linear, int step, float alpha, float beta1, float beta2) {
     int n = linear->in_dim * linear->out_dim;
     int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -123,15 +179,16 @@ void linear_adam(struct linear *linear, int step, float alpha, float beta1, floa
     cublas_sscal(n, beta2, linear->v, 1);
     cublas_saxpy(n, 1 - beta2, linear->d, 1, linear->v, 1);
 
-    linear_adam_kernel<<<grid_size, BLOCK_SIZE>>>(n, step,
-        alpha, beta1, beta2, linear->w, linear->d, linear->m, linear->v);
+    adam_kernel<<<grid_size, BLOCK_SIZE>>>(n, step,
+        alpha, beta1, beta2, linear->w, linear->m, linear->v);
 
     memset_kernel<<<grid_size, BLOCK_SIZE>>>(linear->d, 0, n);
 }
 
 __global__ void relu_forward_kernel(int n, float *input, float *output) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) output[i] = input[i] * (input[i] > 0);
+    if (i < n) output[i] = input[i] * (input[i] > 0) +
+        0.01 * input[i] * (input[i] < 0);
 }
 
 // input: relu inputs
@@ -144,7 +201,8 @@ void relu_forward(int n, float *input, float *output) {
 // pass through gradient when input > 0
 __global__ void relu_backward_kernel(int n, float *input, float *grad, float *output) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) output[i] = grad[i] * (input[i] > 0);
+    if (i < n) output[i] = grad[i] * (input[i] > 0) +
+        grad[i] * 0.01 * (input[i] < 0);
 }
 
 // input: relu inputs
@@ -155,9 +213,10 @@ void relu_backward(int n, float *input, float *grad, float *output) {
     relu_backward_kernel<<<grid_size, BLOCK_SIZE>>>(n, input, grad, output);
 }
 
+#define DROPOUT_PROB 0.0
 __global__ void dropout_forward_kernel(int n, float *input, float *dropout, float *output) {
     int i = blockIdx.x * blockDim.x + threadIdx.x; 
-    if (i < n) output[i] = (dropout[i] < 0.5) * input[i];
+    if (i < n) output[i] = (dropout[i] > DROPOUT_PROB) * input[i];
 }
 
 // input: dropout inputs
@@ -165,7 +224,7 @@ __global__ void dropout_forward_kernel(int n, float *input, float *dropout, floa
 // output: dropout outputs
 void dropout_forward(int n, float *input, float *dropout, float *output) {
     int grid_size = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    curand_generate_uniform(dropout, 1);
+    curand_generate_uniform(dropout, n);
     dropout_forward_kernel<<<grid_size, BLOCK_SIZE>>>(n, input, dropout, output);
 }
 
@@ -173,7 +232,7 @@ void dropout_forward(int n, float *input, float *dropout, float *output) {
 __global__ void dropout_backward_kernel(int n, float *dropout, float *dLdo, float *dLdi) {
     int i = blockIdx.x * blockDim.x + threadIdx.x; 
     if (i < n) {
-        dLdi[i] = (dropout[i] < 0.5) * dLdo[i];
+        dLdi[i] = (dropout[i] > DROPOUT_PROB) * dLdo[i];
     }
 }
 

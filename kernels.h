@@ -1,5 +1,13 @@
-// linear layer with ReLU
-// TODO add bias (none by default)
+// constant bias
+struct bias {
+    int dim;
+    float *b; // constants
+    float *d;
+    float *m;
+    float *v;
+};
+
+// matrix multiplication
 struct linear {
     int in_dim;
     int out_dim;
@@ -10,6 +18,12 @@ struct linear {
 };
 
 float *get_ones(int);
+
+void bias_create(int, struct bias *);
+void bias_init(struct bias *);
+void bias_forward(struct bias *, int, float *);
+void bias_backward(struct bias *, int, float *);
+void bias_adam(struct bias *, int, float, float, float);
 
 void linear_create(int, int, struct linear *);
 void linear_init(struct linear *);
