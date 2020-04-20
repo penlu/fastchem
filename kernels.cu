@@ -53,7 +53,11 @@ void bias_create(int dim, struct bias *bias) {
 void bias_init(struct bias *bias) {
     int size = bias->dim;
     float weight = 1./sqrt(size);
-    curand_generate_normal(bias->b, size, 0, weight);
+    if (size > 1) {
+        curand_generate_normal(bias->b, size, 0, weight);
+    } else {
+        memset_kernel<<<1, 1>>>(bias->b, 0, size);
+    }
 }
 
 void bias_forward(struct bias *bias, int batch, float *input) {

@@ -219,6 +219,10 @@ void cuda_device_synchronize() {
     CUDA_CALL(cudaDeviceSynchronize());
 }
 
+void cuda_set_device_flags(unsigned int flags) {
+    CUDA_CALL(cudaSetDeviceFlags(flags));
+}
+
 // CUBLAS library calls
 
 cublasHandle_t cublas_handle() {
@@ -339,6 +343,7 @@ void curand_generate_uniform(float *output, size_t n) {
     CURAND_CALL(curandGenerateUniform(curand_generator(), output, n));
 }
 
+// XXX note n has to be even!
 void curand_generate_normal(float *output, size_t n, float mean, float stddev) {
     CURAND_CALL(curandGenerateNormal(curand_generator(), output, n, mean, stddev));
 }

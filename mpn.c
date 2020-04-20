@@ -61,7 +61,7 @@ struct mpn {
     struct linear fc[FC_DEPTH]; // hidden_size x hidden_size
     struct bias fcb[FC_DEPTH]; // hidden_size
     struct linear fco; // hidden_size x 1
-    //struct bias fcob; // 1
+    struct bias fcob; // 1
 
     // activation storage
     // TODO surely there is a better way
@@ -128,7 +128,7 @@ struct mpn *mpn_create() {
     }
     // TODO this is a vector dot and should not use sgemm
     linear_create(HIDDEN, 1, &mpn->fco);
-    //bias_create(1, &mpn->fcob);
+    bias_create(1, &mpn->fcob);
 
     return mpn;
 }
@@ -143,7 +143,7 @@ void mpn_init(struct mpn *mpn) {
         bias_init(&mpn->fcb[i]);
     }
     linear_init(&mpn->fco);
-    //bias_init(&mpn->fcob);
+    bias_init(&mpn->fcob);
 }
 
 // allocate memory for intermediate activations
@@ -276,7 +276,7 @@ float *mpn_forward(struct mpn *mpn, struct batch *batch) {
     }
 
     linear_forward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output, mpn->finals);
-    //bias_forward(&mpn->fcob, batch->n_mols, mpn->finals);
+    bias_forward(&mpn->fcob, batch->n_mols, mpn->finals);
 
     return mpn->finals;
 }
@@ -288,7 +288,7 @@ float mpn_backward(struct mpn *mpn, struct batch *batch) {
 
     bceloss_backward(batch->n_mols, mpn->target, mpn->finals, mpn->finals);
 
-    //bias_backward(&mpn->fcob, batch->n_mols, mpn->finals);
+    bias_backward(&mpn->fcob, batch->n_mols, mpn->finals);
     linear_backward(&mpn->fco, batch->n_mols, mpn->fc_acts[FC_DEPTH - 1]->output,
         mpn->finals, mpn->fc_acts[FC_DEPTH - 1]->output);
 

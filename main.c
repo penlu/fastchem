@@ -1,3 +1,4 @@
+#include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +7,8 @@
 #include "datapt.h"
 #include "batch.h"
 #include "mpn.h"
+#include "cuda.h"
+#include <cuda_runtime.h>
 
 void shuffle(int n, int *l) {
     for (int i = 0; i < n - 1; i++) {
@@ -17,6 +20,9 @@ void shuffle(int n, int *l) {
 }
 
 void test(struct mpn *, struct datapt *, int, int);
+
+static int BATCHSIZE = 50;
+static int EPOCHS = 10;
 
 struct mpn *train(struct datapt *data, int N) {
     // prepare batches
@@ -35,7 +41,7 @@ struct mpn *train(struct datapt *data, int N) {
 
     // training loop
     int iters = 0;
-    for (int epoch = 1; epoch <= 20; epoch++) {
+    for (int epoch = 1; epoch <= EPOCHS; epoch++) {
         float tot_loss = 0;
 
         for (int i = 0; i < N / BATCHSIZE; i++) {
@@ -100,14 +106,53 @@ void test(struct mpn *mpn, struct datapt *data, int start, int end) {
 }
 
 int main(int argc, char **argv) {
-    int N;
-    struct datapt *data = parse_datapts(stdin, 7, &N);
+    // parse arguments
+    int opt;
+    int LABEL = 0;
+    while ((opt = getopt(argc, argv, "b:e:l:sh")) != -1) {
+        switch (opt) {
+            case 'b':
+                BATCHSIZE = atoi(optarg);
+                break;
 
+            case 'e':
+                EPOCHS = atoi(optarg);
+                break;
+
+            case 'l':
+                LABEL = atoi(optarg);
+                break;
+
+            case 's':
+                cuda_set_device_flags(cudaDeviceScheduleBlockingSync);
+                break;
+
+            case 'h':
+                printf("Options:\n");
+                printf("-b [BATCHSIZE]\n");
+                printf("-e [EPOCHS]\n");
+                printf("-s - use blocking sync\n");
+                return 0;
+
+            case '?':
+                if (optopt == 'b' || optopt == 'e') {
+                    printf("Option -%c requires an argument!\n", optopt);
+                } else if (isprint(optopt)) {
+                    printf("Unknown option `-%c'.\n", optopt);
+                } else {
+                    printf("Unknown option character `\\x%x'.\n", optopt);
+                }
+                return 1;
+        }
+    }
+
+    // parse datapoints
+    int N;
+    struct datapt *data = parse_datapts(stdin, LABEL, &N);
     printf("parsed %d data points\n", N);
 
-    // run classification
-    struct mpn *mpn = train(data, (int) (N * 0.8));
-    test(mpn, data, (int) (N * 0.8), N);
+    // run training
+    struct mpn *mpn = train(data, N);
 
     for (int i = 0; i < N; i++) {
         free_mol(data[i].mol);
