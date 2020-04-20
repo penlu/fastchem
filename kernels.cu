@@ -65,7 +65,6 @@ void bias_forward(struct bias *bias, int batch, float *input) {
 }
 
 void bias_backward(struct bias *bias, int batch, float *dLdo) {
-    //cublas_sgemv(0, c, r, 1./r, input, c, get_ones(r), 0, output);
     cublas_sgemv(0, bias->dim, batch, 1, dLdo, bias->dim, get_ones(batch), 1, bias->d);
 }
 
@@ -397,8 +396,12 @@ __global__ void average_backward_kernel(int r, int c, float *dLdo, float *dLdi) 
 // TODO this is inefficient
 // TODO use cublasSger instead for efficiency?
 void average_backward(int r, int c, float *dLdo, float *dLdi) {
-    int grid_size = (r + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    average_backward_kernel<<<grid_size, BLOCK_SIZE>>>(r, c, dLdo, dLdi);
+    int grid_size = (r * c + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    memset_kernel<<<grid_size, BLOCK_SIZE>>>(dLdi, 0, r * c);
+    cublas_sger(c, r, 1, dLdo, 1, get_ones(r), 1, dLdi, c);
+
+    /*int grid_size = (r + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    average_backward_kernel<<<grid_size, BLOCK_SIZE>>>(r, c, dLdo, dLdi);*/
 }
 
 __global__ void sigmoid_forward_kernel(int n, float *input, float *output) {

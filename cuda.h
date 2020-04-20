@@ -4,6 +4,7 @@ void cuda_memcpy_htod(void *, void *, size_t);
 void cuda_memcpy_dtoh(void *, void *, size_t);
 void cuda_memcpy_2d(void *, size_t, void *, size_t, size_t, size_t);
 void cuda_device_synchronize(void);
+void cuda_set_device_flags(unsigned int);
 
 // cublas
 void cublas_saxpy(int, float, float *, int, float *, int);

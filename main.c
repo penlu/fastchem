@@ -154,6 +154,8 @@ int main(int argc, char **argv) {
     // run training
     struct mpn *mpn = train(data, N);
 
+    cuda_device_synchronize();
+
     for (int i = 0; i < N; i++) {
         free_mol(data[i].mol);
     }

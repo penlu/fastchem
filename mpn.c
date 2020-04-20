@@ -89,30 +89,69 @@ struct mpn {
     float *finals;
 };
 
-void mol_to_device(struct mol *mol, struct mol *d_mol) {
-    // copy molecule to device
-    cuda_malloc((void **) &d_mol->f_atoms, sizeof(float) * mol->n_atoms * ATOM_FDIM);
-    cuda_malloc((void **) &d_mol->f_bonds, sizeof(float) * mol->n_bonds * BOND_FDIM);
-    cuda_malloc((void **) &d_mol->a_bonds, sizeof(int) * (mol->n_atoms + 1));
-    cuda_malloc((void **) &d_mol->a2b, sizeof(int) * mol->n_bonds);
-    cuda_malloc((void **) &d_mol->b2a, sizeof(int) * mol->n_bonds);
-    cuda_malloc((void **) &d_mol->b2revb, sizeof(int) * mol->n_bonds);
+// allocate memory for intermediate activations
+void alloc_intermediate(struct mpn *mpn, int n_mols, int n_atoms, int n_bonds) {
+    // allocate mol and target
+    cuda_malloc((void **) &mpn->d_mol.f_atoms, sizeof(float) * n_atoms * ATOM_FDIM);
+    cuda_malloc((void **) &mpn->d_mol.f_bonds, sizeof(float) * n_bonds * BOND_FDIM);
+    cuda_malloc((void **) &mpn->d_mol.a_bonds, sizeof(int) * (n_atoms + 1));
+    cuda_malloc((void **) &mpn->d_mol.a2b, sizeof(int) * n_bonds);
+    cuda_malloc((void **) &mpn->d_mol.b2a, sizeof(int) * n_bonds);
+    cuda_malloc((void **) &mpn->d_mol.b2revb, sizeof(int) * n_bonds);
+    cuda_malloc((void **) &mpn->target, sizeof(float) * n_mols);
 
-    cuda_memcpy_htod(d_mol->f_atoms, mol->f_atoms, sizeof(float) * mol->n_atoms * ATOM_FDIM);
-    cuda_memcpy_htod(d_mol->f_bonds, mol->f_bonds, sizeof(float) * mol->n_bonds * BOND_FDIM);
-    cuda_memcpy_htod(d_mol->a_bonds, mol->a_bonds, sizeof(int) * (mol->n_atoms + 1));
-    cuda_memcpy_htod(d_mol->a2b, mol->a2b, sizeof(int) * mol->n_bonds);
-    cuda_memcpy_htod(d_mol->b2a, mol->b2a, sizeof(int) * mol->n_bonds);
-    cuda_memcpy_htod(d_mol->b2revb, mol->b2revb, sizeof(int) * mol->n_bonds);
+    // allocate activations
+    for (int i = 0; i < MP_DEPTH + 1; i++) {
+        mpn->mp_acts[i] = act_create(n_bonds * HIDDEN);
+    }
+    for (int i = 0; i < MP_DEPTH; i++) {
+        cuda_malloc((void **) &mpn->mp_atoms[i], sizeof(float) * n_atoms * HIDDEN);
+        cuda_malloc((void **) &mpn->mp_bonds[i], sizeof(float) * n_bonds * HIDDEN);
+    }
+
+    cuda_malloc((void **) &mpn->out_atoms, sizeof(float) * n_atoms * HIDDEN);
+    cuda_malloc((void **) &mpn->out_atoms_f, sizeof(float) * n_atoms * (ATOM_FDIM + HIDDEN));
+    mpn->out_act = act_create(n_atoms * HIDDEN);
+
+    cuda_malloc((void **) &mpn->embedding, sizeof(float) * n_mols * HIDDEN);
+
+    for (int i = 0; i < FC_DEPTH; i++) {
+        mpn->fc_acts[i] = act_create(n_mols * HIDDEN);
+    }
+
+    cuda_malloc((void **) &mpn->finals, sizeof(float) * n_mols);
 }
 
-void free_dmol(struct mol *d_mol) {
-    cuda_free(d_mol->f_atoms);
-    cuda_free(d_mol->f_bonds);
-    cuda_free(d_mol->a_bonds);
-    cuda_free(d_mol->a2b);
-    cuda_free(d_mol->b2a);
-    cuda_free(d_mol->b2revb);
+void free_intermediate(struct mpn *mpn) {
+    // free mol and target
+    cuda_free(mpn->d_mol.f_atoms);
+    cuda_free(mpn->d_mol.f_bonds);
+    cuda_free(mpn->d_mol.a_bonds);
+    cuda_free(mpn->d_mol.a2b);
+    cuda_free(mpn->d_mol.b2a);
+    cuda_free(mpn->d_mol.b2revb);
+    cuda_free(mpn->target);
+
+    // free activations
+    for (int i = 0; i < MP_DEPTH + 1; i++) {
+        act_free(mpn->mp_acts[i]);
+    }
+    for (int i = 0; i < MP_DEPTH; i++) {
+        cuda_free(mpn->mp_atoms[i]);
+        cuda_free(mpn->mp_bonds[i]);
+    }
+
+    cuda_free(mpn->out_atoms);
+    cuda_free(mpn->out_atoms_f);
+    act_free(mpn->out_act);
+
+    cuda_free(mpn->embedding);
+
+    for (int i = 0; i < FC_DEPTH; i++) {
+        act_free(mpn->fc_acts[i]);
+    }
+
+    cuda_free(mpn->finals);
 }
 
 struct mpn *mpn_create() {
@@ -134,6 +173,9 @@ struct mpn *mpn_create() {
 }
 
 void mpn_init(struct mpn *mpn) {
+    // XXX maximum batch size! 1000 mols, 5000 atoms, 10000 bonds
+    alloc_intermediate(mpn, 1000, 5000, 10000);
+
     linear_init(&mpn->W_i);
     linear_init(&mpn->W_h);
     linear_init(&mpn->W_o);
@@ -146,60 +188,18 @@ void mpn_init(struct mpn *mpn) {
     bias_init(&mpn->fcob);
 }
 
-// allocate memory for intermediate activations
-void alloc_intermediate(struct mpn *mpn, struct batch *batch) {
+void mol_to_device(struct mpn *mpn, struct batch *batch) {
     struct mol *mol = batch->mol;
+    struct mol *d_mol = &mpn->d_mol;
 
-    // move input to GPU
-    mol_to_device(mol, &mpn->d_mol);
-    cuda_malloc((void **) &mpn->target, sizeof(float) * batch->n_mols);
+    // copy molecule and target to device
+    cuda_memcpy_htod(d_mol->f_atoms, mol->f_atoms, sizeof(float) * mol->n_atoms * ATOM_FDIM);
+    cuda_memcpy_htod(d_mol->f_bonds, mol->f_bonds, sizeof(float) * mol->n_bonds * BOND_FDIM);
+    cuda_memcpy_htod(d_mol->a_bonds, mol->a_bonds, sizeof(int) * (mol->n_atoms + 1));
+    cuda_memcpy_htod(d_mol->a2b, mol->a2b, sizeof(int) * mol->n_bonds);
+    cuda_memcpy_htod(d_mol->b2a, mol->b2a, sizeof(int) * mol->n_bonds);
+    cuda_memcpy_htod(d_mol->b2revb, mol->b2revb, sizeof(int) * mol->n_bonds);
     cuda_memcpy_htod(mpn->target, batch->labels, sizeof(float) * batch->n_mols);
-
-    // activation allocations
-    for (int i = 0; i < MP_DEPTH + 1; i++) {
-        mpn->mp_acts[i] = act_create(mol->n_bonds * HIDDEN);
-    }
-    for (int i = 0; i < MP_DEPTH; i++) {
-        cuda_malloc((void **) &mpn->mp_atoms[i], sizeof(float) * mol->n_atoms * HIDDEN);
-        cuda_malloc((void **) &mpn->mp_bonds[i], sizeof(float) * mol->n_bonds * HIDDEN);
-    }
-
-    cuda_malloc((void **) &mpn->out_atoms, sizeof(float) * mol->n_atoms * HIDDEN);
-    cuda_malloc((void **) &mpn->out_atoms_f, sizeof(float) * mol->n_atoms * (ATOM_FDIM + HIDDEN));
-    mpn->out_act = act_create(mol->n_atoms * HIDDEN);
-
-    cuda_malloc((void **) &mpn->embedding, sizeof(float) * batch->n_mols * HIDDEN);
-
-    for (int i = 0; i < FC_DEPTH; i++) {
-        mpn->fc_acts[i] = act_create(batch->n_mols * HIDDEN);
-    }
-
-    cuda_malloc((void **) &mpn->finals, sizeof(float) * batch->n_mols);
-}
-
-void free_intermediate(struct mpn *mpn) {
-    free_dmol(&mpn->d_mol);
-    cuda_free(mpn->target);
-
-    for (int i = 0; i < MP_DEPTH + 1; i++) {
-        act_free(mpn->mp_acts[i]);
-    }
-    for (int i = 0; i < MP_DEPTH; i++) {
-        cuda_free(mpn->mp_atoms[i]);
-        cuda_free(mpn->mp_bonds[i]);
-    }
-
-    cuda_free(mpn->out_atoms);
-    cuda_free(mpn->out_atoms_f);
-    act_free(mpn->out_act);
-
-    cuda_free(mpn->embedding);
-
-    for (int i = 0; i < FC_DEPTH; i++) {
-        act_free(mpn->fc_acts[i]);
-    }
-
-    cuda_free(mpn->finals);
 }
 
 void print_matrix(int rows, int cols, float *d_mat) {
@@ -223,7 +223,7 @@ float *mpn_forward(struct mpn *mpn, struct batch *batch) {
     int n_atoms = mol->n_atoms;
     int n_mols = batch->n_mols;
 
-    alloc_intermediate(mpn, batch);
+    mol_to_device(mpn, batch);
 
     // messages = ReLU(mpn.W_i(mol.f_bonds))
     layer_forward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0]);
@@ -340,8 +340,6 @@ float mpn_backward(struct mpn *mpn, struct batch *batch) {
     cuda_malloc((void **) &garbage, sizeof(float) * n_bonds * BOND_FDIM);
     layer_backward(&mpn->W_i, n_bonds, mpn->d_mol.f_bonds, mpn->mp_acts[0], garbage);
     cuda_free(garbage);
-
-    free_intermediate(mpn);
 }
 
 void mpn_adam(struct mpn *mpn, int step, float alpha, float beta1, float beta2) {
