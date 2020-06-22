@@ -21,7 +21,7 @@ void shuffle(int n, int *l) {
 
 void test(struct mpn *, struct datapt *, int, int);
 
-static int BATCHSIZE = 50;
+static int BATCHSIZE = 128;
 static int EPOCHS = 10;
 
 struct mpn *train(struct datapt *data, int N) {
@@ -31,9 +31,6 @@ struct mpn *train(struct datapt *data, int N) {
         l[i] = i;
     }
 
-    shuffle(N, l);
-    struct batch *batches = batch_create(N, l, BATCHSIZE, data);
-
     // create network
     struct mpn *mpn = mpn_create();
 
@@ -42,6 +39,9 @@ struct mpn *train(struct datapt *data, int N) {
     // training loop
     int iters = 0;
     for (int epoch = 1; epoch <= EPOCHS; epoch++) {
+        shuffle(N, l);
+        struct batch *batches = batch_create(N, l, BATCHSIZE, data);
+
         float tot_loss = 0;
 
         for (int i = 0; i < N / BATCHSIZE; i++) {
@@ -54,14 +54,14 @@ struct mpn *train(struct datapt *data, int N) {
             mpn_adam(mpn, ++iters, 0.001, 0.9, 0.999);
         }
         printf("epoch %d tot %f\n", epoch, tot_loss);
-    }
 
-    for (int i = 0; i < N / BATCHSIZE; i++) {
-        free(batches[i].m_atoms);
-        free_mol(batches[i].mol);
-        free(batches[i].labels);
+        for (int i = 0; i < N / BATCHSIZE; i++) {
+            free(batches[i].m_atoms);
+            free_mol(batches[i].mol);
+            free(batches[i].labels);
+        }
+        free(batches);
     }
-    free(batches);
 
     return mpn;
 }
